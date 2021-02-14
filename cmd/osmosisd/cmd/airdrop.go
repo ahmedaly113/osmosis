@@ -1,25 +1,17 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"math/big"
 	"os"
 
 	"github.com/spf13/cobra"
 
-	"github.com/c-osmosis/osmosis/app/params"
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/flags"
-	"github.com/cosmos/cosmos-sdk/codec"
 	"github.com/cosmos/cosmos-sdk/server"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
-	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	v036genaccounts "github.com/cosmos/cosmos-sdk/x/genaccounts/legacy/v036"
-	"github.com/cosmos/cosmos-sdk/x/genutil"
-	genutiltypes "github.com/cosmos/cosmos-sdk/x/genutil/types"
 	v036staking "github.com/cosmos/cosmos-sdk/x/staking/legacy/v036"
 )
 
@@ -40,12 +32,17 @@ type AppStateV036 struct {
 
 // SnapshotFields provide fields of snapshot per account
 type SnapshotFields struct {
-	AtomAddress string  `json:"atom_address"`
-	AtomBalance sdk.Int `json:"atom_balance"`
-	AtomPercent sdk.Dec `json:"atom_ownership_percentage"`
-	OsmoAddress string  `json:"osmo_address"`
-	OsmoBalance sdk.Int `json:"osmo_balance"`
-	OsmoPercent sdk.Dec `json:"osmo_ownership_percentage"`
+	AtomAddress           string  `json:"atom_address"`
+	AtomBalance           sdk.Int `json:"atom_balance"`
+	AtomStakedBalance     sdk.Int `json:"atom_staked_balance"`
+	AtomUnstakedBalance   sdk.Int `json:"atom_unstaked_balance"`
+	AtomStakedPercent     sdk.Dec `json:"atom_staked_percent"`
+	AtomOwnershipPercent  sdk.Dec `json:"atom_ownership_percent"`
+	OsmoNormalizedBalance sdk.Int `json:"osmo_balance_normalized"`
+	OsmoBalance           sdk.Int `json:"osmo_balance"`
+	OsmoBalanceBonus      sdk.Int `json:"osmo_balance_bonus"`
+	OsmoBalanceBase       sdk.Int `json:"osmo_balance_base"`
+	OsmoPercent           sdk.Dec `json:"osmo_ownership_percent"`
 }
 
 // setCosmosBech32Prefixes set config for cosmos address system
@@ -77,8 +74,8 @@ Example:
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			clientCtx := client.GetClientContextFromCmd(cmd)
-			depCdc := clientCtx.JSONMarshaler
-			cdc := depCdc.(codec.Marshaler)
+			// depCdc := clientCtx.JSONMarshaler
+			// cdc := depCdc.(codec.Marshaler)
 			aminoCodec := clientCtx.LegacyAmino.Amino
 
 			serverCtx := server.GetServerContextFromCmd(cmd)
@@ -88,29 +85,29 @@ Example:
 
 			denom := args[0]
 			filepath := args[1]
-			osdenom := "uosmo"
+			// osdenom := "uosmo"
 			snapshotOutput, err := cmd.Flags().GetString(flagSnapshotOutput)
 			if err != nil {
 				return fmt.Errorf("failed to get snapshot directory: %w", err)
 			}
 
-			totalAmount, ok := sdk.NewIntFromString(args[2])
-			if !ok {
-				return fmt.Errorf("failed to parse totalAmount: %s", args[2])
-			}
+			// totalAmount, ok := sdk.NewIntFromString(args[2])
+			// if !ok {
+			// 	return fmt.Errorf("failed to parse totalAmount: %s", args[2])
+			// }
 
-			genFile := config.GenesisFile()
-			appState, genDoc, err := genutiltypes.GenesisStateFromGenFile(genFile)
-			if err != nil {
-				return fmt.Errorf("failed to unmarshal genesis state: %w", err)
-			}
+			// genFile := config.GenesisFile()
+			// appState, genDoc, err := genutiltypes.GenesisStateFromGenFile(genFile)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to unmarshal genesis state: %w", err)
+			// }
 
-			authGenState := authtypes.GetGenesisStateFromAppState(cdc, appState)
+			// authGenState := authtypes.GetGenesisStateFromAppState(cdc, appState)
 
-			accs, err := authtypes.UnpackAccounts(authGenState.Accounts)
-			if err != nil {
-				return fmt.Errorf("failed to get accounts from any: %w", err)
-			}
+			// accs, err := authtypes.UnpackAccounts(authGenState.Accounts)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to get accounts from any: %w", err)
+			// }
 
 			jsonFile, err := os.Open(filepath)
 			if err != nil {
@@ -128,163 +125,171 @@ Example:
 				return err
 			}
 
-			snapshot := []SnapshotFields{}
-			balanceIndexByAddress := make(map[string]int)
+			snapshot := make(map[string]SnapshotFields)
+
 			totalAtomBalance := sdk.NewInt(0)
-			for index, account := range genStateV036.AppState.Accounts {
-				totalAtomBalance = totalAtomBalance.Add(account.Coins.AmountOf(denom))
-				balanceIndexByAddress[account.Address.String()] = index
-				snapshot = append(snapshot, SnapshotFields{
-					AtomAddress: account.Address.String(),
-					AtomBalance: account.Coins.AmountOf(denom),
-					AtomPercent: sdk.NewDec(0),
-				})
+			for _, account := range genStateV036.AppState.Accounts {
+
+				balance := account.Coins.AmountOf(denom)
+				totalAtomBalance = totalAtomBalance.Add(balance)
+
+				snapshot[account.Address.String()] = SnapshotFields{
+					AtomAddress:         account.Address.String(),
+					AtomBalance:         balance,
+					AtomUnstakedBalance: balance,
+					AtomStakedBalance:   sdk.ZeroInt(),
+				}
+			}
+
+			for _, unbonding := range genStateV036.AppState.Staking.UnbondingDelegations {
+				address := unbonding.DelegatorAddress.String()
+				acc, ok := snapshot[address]
+				if !ok {
+					panic("no account found for unbonding")
+				}
+
+				unbondingAtoms := sdk.NewInt(0)
+				for _, entry := range unbonding.Entries {
+					unbondingAtoms = unbondingAtoms.Add(entry.Balance)
+				}
+
+				acc.AtomBalance = acc.AtomBalance.Add(unbondingAtoms)
+				acc.AtomUnstakedBalance = acc.AtomUnstakedBalance.Add(unbondingAtoms)
+				totalAtomBalance = totalAtomBalance.Add(unbondingAtoms)
+
+				snapshot[address] = acc
+			}
+
+			validators := make(map[string]v036staking.Validator)
+			for _, validator := range genStateV036.AppState.Staking.Validators {
+				validators[validator.OperatorAddress.String()] = validator
 			}
 
 			for _, delegation := range genStateV036.AppState.Staking.Delegations {
-				address := delegation.DelegatorAddress
-				index, ok := balanceIndexByAddress[address.String()]
+				address := delegation.DelegatorAddress.String()
+
+				acc, ok := snapshot[address]
 				if !ok {
+					panic("no account found for delegation")
+				}
+
+				val := validators[delegation.ValidatorAddress.String()]
+				stakedAtoms := delegation.Shares.MulInt(val.Tokens).Quo(val.DelegatorShares).RoundInt()
+
+				acc.AtomBalance = acc.AtomBalance.Add(stakedAtoms)
+				acc.AtomStakedBalance = acc.AtomStakedBalance.Add(stakedAtoms)
+				totalAtomBalance = totalAtomBalance.Add(stakedAtoms)
+
+				snapshot[address] = acc
+			}
+
+			totalOsmoBalance := sdk.NewInt(0)
+
+			// fmt.Println(snapshot)
+
+			oneHalf := sdk.NewDecFromIntWithPrec(sdk.NewInt(5), 1)
+
+			for address, acc := range snapshot {
+				allAtoms := acc.AtomBalance.ToDec()
+
+				acc.AtomOwnershipPercent = allAtoms.QuoInt(totalAtomBalance)
+
+				if allAtoms.IsZero() {
+					acc.AtomStakedPercent = sdk.ZeroDec()
+					acc.OsmoBalanceBase = sdk.ZeroInt()
+					acc.OsmoBalanceBonus = sdk.ZeroInt()
+					acc.OsmoBalance = sdk.ZeroInt()
+					snapshot[address] = acc
 					continue
 				}
-				sharesInt := delegation.Shares.RoundInt()
-				snapshot[index].AtomBalance = snapshot[index].AtomBalance.Add(sharesInt)
-				totalAtomBalance = totalAtomBalance.Add(sharesInt)
-			}
 
-			for index, asnapshot := range snapshot {
-				amt := asnapshot.AtomBalance
-				percent := big.NewInt(0).Div(amt.Mul(sdk.NewInt(1000000)).BigInt(), totalAtomBalance.BigInt())
-				snapshot[index].AtomPercent = sdk.NewDecFromBigIntWithPrec(percent, 4)
-			}
+				stakedAtoms := acc.AtomStakedBalance.ToDec()
+				stakedPercent := stakedAtoms.Quo(allAtoms)
+				acc.AtomStakedPercent = stakedPercent
 
-			params.SetBech32Prefixes()
-
-			balances := []banktypes.Balance{}
-			for index, account := range genStateV036.AppState.Accounts {
-				// fmt.Println("Address: " + account.Address.String())
-				// fmt.Println("Amount: " + account.Coins.String())
-
-				// create concrete account type based on input parameters
-				var genAccount authtypes.GenesisAccount
-				baseAccount := authtypes.NewBaseAccount(account.Address, nil, 0, 0)
-				genAccount = baseAccount
-
-				if err := genAccount.Validate(); err != nil {
-					return fmt.Errorf("failed to validate new genesis account: %w", err)
-				}
-
-				// Add the new account to the set of genesis accounts and sanitize the
-				// accounts afterwards.
-				accs = append(accs, genAccount)
-				accs = authtypes.SanitizeGenesisAccounts(accs)
-
-				atomAmt := account.Coins.AmountOf(denom)
-				osmoAmt, err := atomAmt.ToDec().ApproxSqrt()
+				baseOsmo, err := allAtoms.ApproxSqrt()
 				if err != nil {
-					fmt.Println("failed to root atom balance", err)
-					continue
+					// fmt.Println("failed to root atom balance", err)
+					// continue
+					panic(fmt.Sprintf("failed to root atom balance: %s", err))
 				}
-				coins := sdk.NewCoins(sdk.NewCoin(osdenom, osmoAmt.RoundInt()))
-				address := account.Address
-				balances = append(balances, banktypes.Balance{Address: address.String(), Coins: coins})
-				balanceIndexByAddress[address.String()] = index
+				acc.OsmoBalanceBase = baseOsmo.RoundInt()
+
+				bonusOsmo := baseOsmo.Mul(oneHalf).Mul(stakedPercent)
+				acc.OsmoBalanceBonus = bonusOsmo.RoundInt()
+
+				allOsmo := baseOsmo.Add(bonusOsmo)
+				acc.OsmoBalance = allOsmo.RoundInt()
+
+				totalOsmoBalance = totalOsmoBalance.Add(allOsmo.RoundInt())
+
+				snapshot[address] = acc
 			}
 
-			for _, delegation := range genStateV036.AppState.Staking.Delegations {
-				address := delegation.DelegatorAddress
-				shares := delegation.Shares
-				index, ok := balanceIndexByAddress[address.String()]
-				if !ok {
-					continue
-				}
-				originAmt := sdk.NewInt(0)
-				if len(balances[index].Coins) > 0 {
-					originAmt = balances[index].Coins.AmountOf(osdenom)
-				}
-				osmoShareBonusRaw, err := shares.ApproxSqrt()
-				if err != nil {
-					fmt.Println("failed to root atom shares", err)
-					continue
-				}
-				// apply 1.5x multiplier for
-				osmoShareBonus := osmoShareBonusRaw.Mul(sdk.NewDecWithPrec(15, 10)).RoundInt()
-				osmoAmt := originAmt.Add(osmoShareBonus)
-				balances[index].Coins = sdk.NewCoins(sdk.NewCoin(osdenom, osmoAmt))
+			// normalize to initial Atom supply
+			noarmalizationFactor := totalAtomBalance.ToDec().Quo(totalOsmoBalance.ToDec())
+
+			for address, acc := range snapshot {
+				acc.OsmoPercent = acc.OsmoBalance.ToDec().Quo(totalOsmoBalance.ToDec())
+
+				acc.OsmoNormalizedBalance = acc.OsmoBalance.ToDec().Mul(noarmalizationFactor).RoundInt()
+
+				snapshot[address] = acc
 			}
 
-			// normalize for total number of tokens to drop
-			totalRaw := sdk.NewInt(0)
-			for _, balance := range balances {
-				totalRaw = totalRaw.Add(balance.Coins.AmountOf(osdenom))
-			}
-			for index, balance := range balances {
-				amt := balance.Coins.AmountOf(osdenom)
-				percent := big.NewInt(0).Div(amt.Mul(sdk.NewInt(1000000)).BigInt(), totalRaw.BigInt())
-				snapshot[index].OsmoAddress = balance.Address
-				snapshot[index].OsmoBalance = amt
-				snapshot[index].OsmoPercent = sdk.NewDecFromBigIntWithPrec(percent, 4)
-			}
-			for i, balance := range balances {
-				osmoAmtBI := balance.Coins.AmountOf(osdenom).BigInt()
-				osmoAmtMulBI := osmoAmtBI.Mul(osmoAmtBI, totalAmount.BigInt())
-				osmoAmtNormalBI := osmoAmtMulBI.Div(osmoAmtMulBI, totalRaw.BigInt())
-				osmoAmtNormal := sdk.NewIntFromBigInt(osmoAmtNormalBI)
-				balances[i].Coins = sdk.NewCoins(sdk.NewCoin(osdenom, osmoAmtNormal))
-			}
+			// // remove empty accounts
+			// finalBalances := []banktypes.Balance{}
+			// totalDistr := sdk.NewInt(0)
+			// for _, balance := range balances {
+			// 	if balance.Coins.Empty() {
+			// 		continue
+			// 	}
+			// 	if balance.Coins.AmountOf(osdenom).Equal(sdk.NewInt(0)) {
+			// 		continue
+			// 	}
+			// 	finalBalances = append(finalBalances, balance)
+			// 	totalDistr = totalDistr.Add(balance.Coins.AmountOf(osdenom))
+			// }
 
-			// remove empty accounts
-			finalBalances := []banktypes.Balance{}
-			totalDistr := sdk.NewInt(0)
-			for _, balance := range balances {
-				if balance.Coins.Empty() {
-					continue
-				}
-				if balance.Coins.AmountOf(osdenom).Equal(sdk.NewInt(0)) {
-					continue
-				}
-				finalBalances = append(finalBalances, balance)
-				totalDistr = totalDistr.Add(balance.Coins.AmountOf(osdenom))
-			}
-			fmt.Println("total distributed amount:", totalDistr.String())
-			fmt.Printf("cosmos accounts: %d\n", len(balances))
-			fmt.Printf("empty drops: %d\n", len(balances)-len(finalBalances))
-			fmt.Printf("available accounts: %d\n", len(finalBalances))
+			// fmt.Println("total distributed amount:", totalDistr.String())
+			fmt.Printf("cosmos accounts: %d\n", len(snapshot))
+			// fmt.Printf("empty drops: %d\n", len(balances)-len(finalBalances))
+			// fmt.Printf("available accounts: %d\n", len(finalBalances))
 
-			genAccs, err := authtypes.PackAccounts(accs)
-			if err != nil {
-				return fmt.Errorf("failed to convert accounts into any's: %w", err)
-			}
-			authGenState.Accounts = genAccs
+			// genAccs, err := authtypes.PackAccounts(accs)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to convert accounts into any's: %w", err)
+			// }
+			// authGenState.Accounts = genAccs
 
-			authGenStateBz, err := cdc.MarshalJSON(&authGenState)
-			if err != nil {
-				return fmt.Errorf("failed to marshal auth genesis state: %w", err)
-			}
+			// authGenStateBz, err := cdc.MarshalJSON(&authGenState)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to marshal auth genesis state: %w", err)
+			// }
 
-			appState[authtypes.ModuleName] = authGenStateBz
+			// appState[authtypes.ModuleName] = authGenStateBz
 
-			bankGenState := banktypes.GetGenesisStateFromAppState(depCdc, appState)
-			bankGenState.Balances = banktypes.SanitizeGenesisBalances(balances)
+			// bankGenState := banktypes.GetGenesisStateFromAppState(depCdc, appState)
+			// bankGenState.Balances = banktypes.SanitizeGenesisBalances(balances)
 
-			bankGenStateBz, err := cdc.MarshalJSON(bankGenState)
-			if err != nil {
-				return fmt.Errorf("failed to marshal bank genesis state: %w", err)
-			}
+			// bankGenStateBz, err := cdc.MarshalJSON(bankGenState)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to marshal bank genesis state: %w", err)
+			// }
 
-			appState[banktypes.ModuleName] = bankGenStateBz
+			// appState[banktypes.ModuleName] = bankGenStateBz
 
-			appStateJSON, err := json.Marshal(appState)
-			if err != nil {
-				return fmt.Errorf("failed to marshal application genesis state: %w", err)
-			}
+			// appStateJSON, err := json.Marshal(appState)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to marshal application genesis state: %w", err)
+			// }
 
-			genDoc.AppState = appStateJSON
+			// genDoc.AppState = appStateJSON
 
-			err = genutil.ExportGenesisFile(genDoc, genFile)
-			if err != nil {
-				return err
-			}
+			// err = genutil.ExportGenesisFile(genDoc, genFile)
+			// if err != nil {
+			// 	return err
+			// }
 
 			// export snapshot directory
 			snapshotJSON, err := aminoCodec.MarshalJSON(snapshot)
