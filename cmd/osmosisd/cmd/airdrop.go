@@ -187,7 +187,7 @@ Example:
 
 			// fmt.Println(snapshot)
 
-			oneHalf := sdk.NewDecFromIntWithPrec(sdk.NewInt(5), 1)
+			onePointFive := sdk.MustNewDecFromStr("1.5") // sdk.NewDecFromIntWithPrec(sdk.NewInt(15), 1)
 
 			for address, acc := range snapshot {
 				allAtoms := acc.AtomBalance.ToDec()
@@ -215,13 +215,19 @@ Example:
 				}
 				acc.OsmoBalanceBase = baseOsmo.RoundInt()
 
-				bonusOsmo := baseOsmo.Mul(oneHalf).Mul(stakedPercent)
+				bonusOsmo := baseOsmo.Mul(onePointFive).Mul(stakedPercent)
 				acc.OsmoBalanceBonus = bonusOsmo.RoundInt()
 
 				allOsmo := baseOsmo.Add(bonusOsmo)
 				acc.OsmoBalance = allOsmo.RoundInt()
 
 				totalOsmoBalance = totalOsmoBalance.Add(allOsmo.RoundInt())
+
+				if allAtoms.LT(sdk.OneDec()) {
+					acc.OsmoBalanceBase = sdk.ZeroInt()
+					acc.OsmoBalanceBonus = sdk.ZeroInt()
+					acc.OsmoBalance = sdk.ZeroInt()
+				}
 
 				snapshot[address] = acc
 			}
@@ -253,6 +259,7 @@ Example:
 
 			// fmt.Println("total distributed amount:", totalDistr.String())
 			fmt.Printf("cosmos accounts: %d\n", len(snapshot))
+			fmt.Printf("atomTotalSupply: %d\n", totalAtomBalance)
 			// fmt.Printf("empty drops: %d\n", len(balances)-len(finalBalances))
 			// fmt.Printf("available accounts: %d\n", len(finalBalances))
 
